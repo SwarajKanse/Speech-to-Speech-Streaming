@@ -1,15 +1,4 @@
 import os
-import whisper
-from deep_translator import GoogleTranslator
-from pydub import AudioSegment
-from TTS.api import TTS
-import torch
-from TTS.tts.configs.xtts_config import XttsConfig
-from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
-from TTS.config.shared_configs import BaseDatasetConfig
-from google.generativeai import configure, GenerativeModel
-from dotenv import load_dotenv
-import re
 import tempfile
 import logging
 import time
@@ -17,6 +6,16 @@ import argparse
 from pathlib import Path
 import concurrent.futures
 import gc
+import threading
+import torch
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
+from dotenv import load_dotenv
+import re
+from faster_whisper import WhisperModel
+from deep_translator import GoogleTranslator
+from TTS.api import TTS
+from google.generativeai import configure, GenerativeModel
 
 # Set up logging
 logging.basicConfig(
@@ -26,71 +25,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Allow XTTS config classes to be safely unpickled
-torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
 
-
-# Standalone function for parallel processing
-def process_tts_chunk_standalone(chunk_data):
-    """
-    Standalone function to process a single TTS chunk (for parallel processing).
-    
-    Args:
-        chunk_data (tuple): Tuple containing (chunk_index, chunk_text, input_audio, target_lang, part_path, device, optimize_memory).
-        
-    Returns:
-        tuple: Tuple containing (chunk_index, part_path).
-    """
-    chunk_index, chunk_text, input_audio, target_lang, part_path, device, optimize_memory = chunk_data
-    
-    try:
-        logger.info(f"Synthesizing part {chunk_index+1}...")
-        start_time = time.time()
-        
-        # Create a local TTS model instance
-        local_tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
-        if device == "cuda":
-            # Use a specific GPU if available
-            local_tts = local_tts.to("cuda")
-        
-        local_tts.tts_to_file(
-            text=chunk_text,
-            speaker_wav=input_audio,
-            language=target_lang,
-            file_path=part_path,
-        )
-        
-        synthesis_time = time.time() - start_time
-        logger.info(f"Part {chunk_index+1} synthesized in {synthesis_time:.2f} seconds")
-        
-        # Clear memory if optimizing
-        if optimize_memory and device == "cuda":
-            del local_tts
-            if torch.cuda.is_available():
-                gc.collect()
-                torch.cuda.empty_cache()
-                
-        return chunk_index, part_path
-    except Exception as e:
-        logger.error(f"Error processing chunk {chunk_index+1}: {e}")
-        return chunk_index, None
-
-
-class AudioTranslator:
+class OptimizedAudioTranslator:
     def __init__(self, output_path=None, chunk_size=250, cleanup_temp=True, 
-                 parallel_processing=True, max_workers=None, optimize_memory=True,
-                 whisper_model_size="base"):
+                 whisper_model_size="medium", use_gpu=True):
         """
-        Initialize the AudioTranslator with configuration options.
+        Initialize the OptimizedAudioTranslator with configuration options.
         
         Args:
             output_path (str): Directory to save output files. Default is "output_audio".
             chunk_size (int): Maximum character length for TTS chunks. Default is 250.
             cleanup_temp (bool): Whether to clean up temporary files. Default is True.
-            parallel_processing (bool): Whether to use parallel processing for TTS. Default is True.
-            max_workers (int): Maximum number of workers for parallel processing. Default is None (auto).
-            optimize_memory (bool): Whether to optimize memory usage. Default is True.
-            whisper_model_size (str): Size of the Whisper model. Default is "base".
+            whisper_model_size (str): Size of the Whisper model. Default is "medium".
+            use_gpu (bool): Whether to use GPU for processing. Default is True.
         """
         # Load environment variables
         load_dotenv()
@@ -103,13 +50,12 @@ class AudioTranslator:
         os.makedirs(self.output_path, exist_ok=True)
         
         # Configuration
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.use_gpu = use_gpu and torch.cuda.is_available()
+        self.device = "cuda" if self.use_gpu else "cpu"
+        self.compute_type = "float16" if self.use_gpu else "int8"
         self.chunk_size = chunk_size
         self.cleanup_temp = cleanup_temp
         self.temp_files = []
-        self.parallel_processing = parallel_processing
-        self.max_workers = max_workers
-        self.optimize_memory = optimize_memory
         self.whisper_model_size = whisper_model_size
         
         # Initialize models lazily (they'll be loaded when needed)
@@ -117,16 +63,24 @@ class AudioTranslator:
         self._tts_model = None
         self._gemini_model = None
         
-        logger.info(f"Initialized AudioTranslator (device: {self.device}, chunk size: {self.chunk_size}, "
-                   f"parallel: {parallel_processing}, whisper model: {whisper_model_size})")
+        logger.info(f"Initialized OptimizedAudioTranslator (device: {self.device}, "
+                   f"whisper model: {whisper_model_size}, compute type: {self.compute_type})")
     
     @property
     def whisper_model(self):
-        """Lazy loading of the Whisper model."""
+        """Lazy loading of the Whisper model using faster-whisper."""
         if self._whisper_model is None:
-            logger.info(f"Loading Whisper {self.whisper_model_size} model...")
+            logger.info(f"Loading faster-whisper {self.whisper_model_size} model...")
             start_time = time.time()
-            self._whisper_model = whisper.load_model(self.whisper_model_size)
+            
+            # Use GPU if available, with appropriate compute type
+            self._whisper_model = WhisperModel(
+                self.whisper_model_size, 
+                device=self.device,
+                compute_type=self.compute_type,
+                download_root="./models"  # Cache models locally
+            )
+            
             logger.info(f"Whisper model loaded in {time.time() - start_time:.2f} seconds")
         return self._whisper_model
     
@@ -151,7 +105,7 @@ class AudioTranslator:
     
     def _clear_memory(self):
         """Clear CUDA memory cache."""
-        if self.optimize_memory and torch.cuda.is_available():
+        if self.use_gpu:
             gc.collect()
             torch.cuda.empty_cache()
             logger.debug("Cleared CUDA memory cache")
@@ -165,13 +119,11 @@ class AudioTranslator:
             
         Returns:
             str: Path to the converted WAV file.
-            
-        Raises:
-            ValueError: If the audio file cannot be converted.
         """
         try:
             logger.info(f"Converting {input_path} to WAV format")
             audio = AudioSegment.from_file(input_path)
+            
             # Create a temporary WAV file
             fd, wav_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
@@ -181,47 +133,53 @@ class AudioTranslator:
         except Exception as e:
             raise ValueError(f"Failed to convert audio file: {e}")
     
-    def split_audio_for_transcription(self, audio_path, segment_length_ms=60000):
+    def preprocess_audio(self, audio_path):
         """
-        Split long audio into shorter segments for faster transcription.
+        Preprocess audio for better transcription quality.
         
         Args:
             audio_path (str): Path to the WAV audio file.
-            segment_length_ms (int): Length of each segment in milliseconds. Default is 60000 (1 minute).
             
         Returns:
-            list: List of paths to temporary segment files.
+            str: Path to the preprocessed audio file.
         """
         try:
-            full_audio = AudioSegment.from_file(audio_path)
-            total_length_ms = len(full_audio)
+            logger.info("Preprocessing audio for improved transcription...")
+            audio = AudioSegment.from_file(audio_path)
             
-            if total_length_ms <= segment_length_ms:
-                # No need to split
-                return [audio_path]
+            # Normalize volume for better transcription
+            audio = audio.normalize()
             
-            logger.info(f"Splitting {total_length_ms/1000:.2f}s audio into {segment_length_ms/1000:.0f}s segments")
+            # Remove silence to speed up processing
+            # Keep 300ms of silence at the beginning and end
+            audio_chunks = split_on_silence(
+                audio, 
+                min_silence_len=500,  # Minimum silence length (ms)
+                silence_thresh=-40,   # Silence threshold (dB)
+                keep_silence=300      # Keep 300ms of silence
+            )
             
-            segment_paths = []
-            for i in range(0, total_length_ms, segment_length_ms):
-                end = min(i + segment_length_ms, total_length_ms)
-                segment = full_audio[i:end]
-                
-                fd, segment_path = tempfile.mkstemp(suffix=f"_seg{i//segment_length_ms}.wav")
-                os.close(fd)
-                segment.export(segment_path, format="wav")
-                segment_paths.append(segment_path)
-                self.temp_files.append(segment_path)
+            # Combine chunks with a small amount of silence between
+            processed_audio = AudioSegment.empty()
+            for chunk in audio_chunks:
+                processed_audio += chunk + AudioSegment.silent(duration=100)
             
-            logger.info(f"Split audio into {len(segment_paths)} segments")
-            return segment_paths
+            # Export to a temporary file
+            fd, processed_path = tempfile.mkstemp(suffix="_processed.wav")
+            os.close(fd)
+            processed_audio.export(processed_path, format="wav")
+            self.temp_files.append(processed_path)
+            
+            logger.info(f"Audio preprocessing complete. Duration reduced from "
+                       f"{len(audio)/1000:.2f}s to {len(processed_audio)/1000:.2f}s")
+            return processed_path
         except Exception as e:
-            logger.error(f"Error splitting audio: {e}")
-            return [audio_path]  # Fall back to the original file
+            logger.warning(f"Audio preprocessing failed: {e}. Using original audio.")
+            return audio_path
     
     def transcribe_audio(self, audio_path):
         """
-        Transcribe audio using Whisper.
+        Transcribe audio using faster-whisper.
         
         Args:
             audio_path (str): Path to the WAV audio file.
@@ -229,91 +187,116 @@ class AudioTranslator:
         Returns:
             str: Transcribed text.
         """
-        logger.info("Transcribing audio...")
+        logger.info("Transcribing audio with faster-whisper...")
         start_time = time.time()
         
-        # Split long audio for faster processing
-        audio_segments = self.split_audio_for_transcription(audio_path)
+        # Preprocess the audio for better quality
+        processed_audio = self.preprocess_audio(audio_path)
         
-        if len(audio_segments) == 1:
-            # Single segment
-            result = self.whisper_model.transcribe(audio_path)
-            transcribed_text = result["text"]
-        else:
-            # Multiple segments - transcribe each and combine
-            transcribed_segments = []
-            
-            for i, segment_path in enumerate(audio_segments):
-                logger.info(f"Transcribing segment {i+1}/{len(audio_segments)}...")
-                result = self.whisper_model.transcribe(segment_path)
-                transcribed_segments.append(result["text"])
-                
-                # Clear memory after each segment if requested
-                if self.optimize_memory:
-                    self._clear_memory()
-            
-            transcribed_text = " ".join(transcribed_segments)
+        # Transcribe with optimized settings
+        segments, info = self.whisper_model.transcribe(
+            processed_audio,
+            beam_size=5,           # Higher beam size for better accuracy
+            language=None,         # Auto-detect language
+            vad_filter=True,       # Voice activity detection
+            vad_parameters=dict(min_silence_duration_ms=500)  # Filter silence
+        )
+        
+        # Collect all segments
+        transcribed_text = ""
+        for segment in segments:
+            transcribed_text += segment.text + " "
         
         transcription_time = time.time() - start_time
         logger.info(f"Transcription completed in {transcription_time:.2f} seconds")
-        return transcribed_text
+        logger.info(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+        
+        # Clean up memory
+        if self.use_gpu:
+            self._clear_memory()
+            
+        return transcribed_text.strip()
     
-    def translate_text(self, text, target_lang="hi"):
+    def translate_text(self, text, target_lang="hi", source_lang=None):
         """
-        Translate text using Gemini (fallback to Google Translate if needed).
+        Translate text using a two-tier approach for optimal speed and accuracy.
         
         Args:
             text (str): Text to translate.
             target_lang (str): Target language code. Default is "hi" (Hindi).
+            source_lang (str): Source language code. Default is None (auto-detect).
             
         Returns:
             str: Translated text.
         """
-        logger.info(f"Translating to '{target_lang}' using Gemini...")
+        logger.info(f"Translating to '{target_lang}'...")
         start_time = time.time()
         
+        # Skip translation if source and target are the same
+        if source_lang and source_lang == target_lang:
+            logger.info("Source and target languages are the same, skipping translation")
+            return text
+            
         # Split very long text for better translation quality
-        if len(text) > 5000:
-            return self._translate_long_text(text, target_lang)
+        if len(text) > 1500:
+            return self._translate_long_text(text, target_lang, source_lang)
         
         try:
-            prompt = f"Translate the following text to {target_lang}:\n{text}"
-            response = self.gemini_model.generate_content(prompt)
-            translated = response.text.strip()
-            if not translated:
-                raise ValueError("Empty translation from Gemini.")
+            # First try Google Translate (faster)
+            translator = GoogleTranslator(source=source_lang or "auto", target=target_lang)
+            translated = translator.translate(text)
             
+            # Verify translation quality (if much shorter, might be poor quality)
+            if len(translated) < len(text) * 0.5 and len(text) > 100:
+                logger.warning("Translation appears too short, might be low quality")
+                raise ValueError("Potentially low-quality translation, trying Gemini instead")
+                
             translation_time = time.time() - start_time
-            logger.info(f"Gemini translation completed in {translation_time:.2f} seconds")
-            return translated
+            logger.info(f"Google Translate completed in {translation_time:.2f} seconds")
+            return translated.strip()
+            
         except Exception as e:
-            logger.warning(f"Gemini translation failed: {e}")
-            logger.info("Falling back to Google Translate...")
+            logger.warning(f"Google Translate failed or produced low-quality result: {e}")
+            logger.info("Trying Gemini for better accuracy...")
             
             try:
-                fallback_start = time.time()
-                translator = GoogleTranslator(source="auto", target=target_lang)
-                translated = translator.translate(text)
+                gemini_start = time.time()
                 
-                fallback_time = time.time() - fallback_start
-                logger.info(f"Google Translate fallback completed in {fallback_time:.2f} seconds")
-                return translated.strip()
+                # Create a more detailed prompt for Gemini
+                prompt = f"""Please translate the following text to {target_lang}. 
+                Maintain the original style, tone, and format:
+
+                {text}
+                
+                Translation:"""
+                
+                response = self.gemini_model.generate_content(prompt)
+                translated = response.text.strip()
+                
+                gemini_time = time.time() - gemini_start
+                logger.info(f"Gemini translation completed in {gemini_time:.2f} seconds")
+                return translated
+                
             except Exception as e2:
-                logger.error(f"Google Translate also failed: {e2}")
-                return ""
+                logger.error(f"Gemini translation also failed: {e2}")
+                # Fall back to original Google Translate result if we have it
+                if 'translated' in locals() and translated:
+                    return translated.strip()
+                return text  # Worst case, return original
     
-    def _translate_long_text(self, text, target_lang):
+    def _translate_long_text(self, text, target_lang, source_lang=None):
         """
         Translate long text by splitting it into paragraphs.
         
         Args:
             text (str): Long text to translate.
             target_lang (str): Target language code.
+            source_lang (str): Source language code. Default is None (auto-detect).
             
         Returns:
             str: Combined translated text.
         """
-        logger.info("Splitting long text for translation")
+        logger.info("Splitting long text for optimal translation")
         
         # Split by paragraphs (double newlines)
         paragraphs = re.split(r'\n\s*\n', text)
@@ -341,7 +324,7 @@ class AudioTranslator:
         translated_parts = []
         for i, part in enumerate(split_paragraphs):
             logger.info(f"Translating part {i+1}/{len(split_paragraphs)}")
-            translated = self.translate_text(part, target_lang)
+            translated = self.translate_text(part, target_lang, source_lang)
             translated_parts.append(translated)
         
         # Join with double newlines to preserve paragraph structure
@@ -357,10 +340,12 @@ class AudioTranslator:
         Returns:
             list: List of text chunks.
         """
-        # This regex covers punctuation for English, Hindi (।), Arabic/Urdu (؟, ؛), and common ones
+        # This regex covers punctuation for multiple languages
         sentence_endings = r'[.!?।؛؟\n]'
-        # Split while keeping the punctuation as separate tokens
+        
+        # Split while keeping the punctuation
         parts = re.split(f'({sentence_endings})', text)
+        
         # Combine each sentence with its punctuation
         sentences = []
         for i in range(0, len(parts)-1, 2):
@@ -368,70 +353,60 @@ class AudioTranslator:
                 sentence = parts[i].strip() + parts[i+1].strip()
                 if sentence:
                     sentences.append(sentence)
-        # In case there's any trailing text without punctuation
+        
+        # Handle trailing text without punctuation
         if len(parts) % 2 != 0 and parts[-1].strip():
             sentences.append(parts[-1].strip())
 
         chunks = []
         current_chunk = ""
+        
         for sentence in sentences:
-            # If adding the sentence exceeds the chunk_size, then start a new chunk.
+            # If adding the sentence exceeds the chunk_size, start a new chunk
             if len(current_chunk) + len(sentence) + 1 > self.chunk_size:
                 if current_chunk:
                     chunks.append(current_chunk.strip())
                     current_chunk = sentence + " "
                 else:
-                    # If the sentence itself is longer than chunk_size, hard-split it.
+                    # If the sentence itself is longer than chunk_size, hard-split it
                     while len(sentence) > self.chunk_size:
                         chunks.append(sentence[:self.chunk_size])
                         sentence = sentence[self.chunk_size:]
                     current_chunk = sentence + " "
             else:
                 current_chunk += sentence + " "
+                
         if current_chunk:
             chunks.append(current_chunk.strip())
             
         logger.info(f"Text split into {len(chunks)} chunk(s)")
         return chunks
     
-    def process_tts_chunk(self, chunk_data):
+    def compute_speaker_embedding(self, input_audio):
         """
-        Process a single TTS chunk (for sequential processing).
+        Compute speaker embedding once to reuse across TTS chunks.
         
         Args:
-            chunk_data (tuple): Tuple containing (chunk_index, chunk_text, input_audio, target_lang, part_path).
+            input_audio (str): Path to the reference voice audio file.
             
         Returns:
-            tuple: Tuple containing (chunk_index, part_path).
+            Any: Speaker embedding object that can be reused.
         """
-        chunk_index, chunk_text, input_audio, target_lang, part_path = chunk_data
+        logger.info("Computing speaker embedding...")
+        start_time = time.time()
         
-        try:
-            logger.info(f"Synthesizing part {chunk_index+1}...")
-            start_time = time.time()
-            
-            self.tts_model.tts_to_file(
-                text=chunk_text,
-                speaker_wav=input_audio,
-                language=target_lang,
-                file_path=part_path,
-            )
-            
-            synthesis_time = time.time() - start_time
-            logger.info(f"Part {chunk_index+1} synthesized in {synthesis_time:.2f} seconds")
-            
-            # Clear memory if optimizing
-            if self.optimize_memory and self.device == "cuda":
-                self._clear_memory()
-                
-            return chunk_index, part_path
-        except Exception as e:
-            logger.error(f"Error processing chunk {chunk_index+1}: {e}")
-            return chunk_index, None
+        # Ensure TTS model is loaded
+        tts_model = self.tts_model
+        
+        # Compute the embedding
+        speaker_embedding = tts_model.synthesizer.tts_model.speaker_manager.compute_embedding(input_audio)
+        
+        logger.info(f"Speaker embedding computed in {time.time() - start_time:.2f} seconds")
+        return speaker_embedding
     
-    def clone_voice_xtts(self, input_audio, translated_text, target_lang="hi"):
+    def clone_voice_xtts_optimized(self, input_audio, translated_text, target_lang="hi"):
         """
-        Clone the voice using XTTS in chunks with optional parallel processing.
+        Optimized voice cloning using pre-computed speaker embedding.
         
         Args:
             input_audio (str): Path to the reference voice audio file.
@@ -439,40 +414,39 @@ class AudioTranslator:
             target_lang (str): Target language code. Default is "hi" (Hindi).
             
         Returns:
-            list: List of paths to cloned audio part files.
-            str: Path to the combined audio file.
+            tuple: Tuple containing (list of audio part paths, combined audio path).
         """
-        logger.info(f"Cloning voice with XTTS (parallel: {self.parallel_processing})...")
+        logger.info("Cloning voice with optimized XTTS...")
         text_chunks = self.smart_split_text(translated_text)
         
-        # Prepare chunk data for processing
-        part_paths = [None] * len(text_chunks)  # Preallocate to maintain order
+        # Pre-compute speaker embedding once
+        speaker_embedding = self.compute_speaker_embedding(input_audio)
         
-        # Process chunks
-        if self.parallel_processing and len(text_chunks) > 1:
-            # Prepare data for parallel processing
-            chunk_data = []
-            for i, chunk in enumerate(text_chunks):
-                part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
-                # Include device and optimize_memory in the chunk data for the standalone function
-                chunk_data.append((i, chunk, input_audio, target_lang, part_path, self.device, self.optimize_memory))
-            
-            # Use parallel processing for multiple chunks
-            with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                # Use the standalone function instead of the class method
-                for chunk_index, part_path in executor.map(process_tts_chunk_standalone, chunk_data):
-                    if part_path:
-                        part_paths[chunk_index] = part_path
-        else:
-            # Process sequentially using the class method
-            for i, chunk in enumerate(text_chunks):
-                part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
-                chunk_index, part_path = self.process_tts_chunk((i, chunk, input_audio, target_lang, part_path))
-                if part_path:
-                    part_paths[i] = part_path
+        # Process chunks sequentially with the same model instance
+        cloned_audio_paths = []
         
-        # Filter out any None values (failed chunks)
-        cloned_audio_paths = [path for path in part_paths if path]
+        for i, chunk in enumerate(text_chunks):
+            try:
+                logger.info(f"Synthesizing part {i+1}/{len(text_chunks)}...")
+                start_time = time.time()
+                
+                part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
+                
+                # Use pre-computed speaker embedding
+                self.tts_model.tts_to_file(
+                    text=chunk,
+                    file_path=part_path,
+                    speaker_wav=None,  # Don't recompute embedding
+                    speaker_embedding=speaker_embedding,
+                    language=target_lang,
+                )
+                
+                synthesis_time = time.time() - start_time
+                logger.info(f"Part {i+1} synthesized in {synthesis_time:.2f} seconds")
+                cloned_audio_paths.append(part_path)
+                
+            except Exception as e:
+                logger.error(f"Error processing chunk {i+1}: {e}")
         
         # Combine all audio parts
         combined_path = os.path.join(self.output_path, "translated_audio_combined.wav")
@@ -483,6 +457,9 @@ class AudioTranslator:
         else:
             logger.error("No audio parts were successfully generated")
             combined_path = None
+        
+        # Clear memory
+        self._clear_memory()
             
         return cloned_audio_paths, combined_path
     
@@ -496,16 +473,20 @@ class AudioTranslator:
         """
         logger.info(f"Combining {len(audio_paths)} audio parts...")
         combined = AudioSegment.empty()
+        
         for path in audio_paths:
             segment = AudioSegment.from_file(path)
             combined += segment
             
+        # Normalize volume of final audio
+        combined = combined.normalize()
+        
         combined.export(output_path, format="wav")
         logger.info(f"Combined audio saved to: {output_path}")
     
     def translate_and_clone(self, input_audio, target_lang="hi"):
         """
-        Full pipeline: Transcribe, Translate, and Clone Voice.
+        Full pipeline: Transcribe, Translate, and Clone Voice with optimizations.
         
         Args:
             input_audio (str): Path to the input audio file.
@@ -514,27 +495,35 @@ class AudioTranslator:
         Returns:
             dict: Results including original text, translated text, and audio paths.
         """
-        logger.info(f"🚀 Starting translation and cloning to {target_lang}...")
+        logger.info(f"🚀 Starting optimized translation and cloning to {target_lang}...")
         total_start_time = time.time()
         
         # Step 1: Convert audio to WAV
         input_wav = self.convert_to_wav(input_audio)
         logger.info(f"🎵 Converted audio to WAV: {input_wav}")
         
-        # Step 2: Transcribe
+        # Step 2: Transcribe with whisper
         original_text = self.transcribe_audio(input_wav)
         logger.info(f"📄 Original Text: {original_text[:100]}...")
         
-        # Clear memory after transcription
-        if self.optimize_memory:
-            self._clear_memory()
+        # Get the detected language from the transcription (for possible skipping translation)
+        detected_lang = self._whisper_model.detect_language(input_wav)[0]
+        logger.info(f"Detected language: {detected_lang}")
+        
+        # Unload Whisper model to free memory
+        self._whisper_model = None
+        self._clear_memory()
         
         # Step 3: Translate
-        translated_text = self.translate_text(original_text, target_lang)
+        translated_text = self.translate_text(original_text, target_lang, source_lang=detected_lang)
         logger.info(f"🌐 Translated Text: {translated_text[:100]}...")
         
-        # Step 4: Clone voice
-        audio_parts, combined_audio = self.clone_voice_xtts(input_wav, translated_text, target_lang)
+        # Step 4: Clone voice with optimized approach
+        audio_parts, combined_audio = self.clone_voice_xtts_optimized(input_wav, translated_text, target_lang)
+        
+        # Unload TTS model to free memory
+        self._tts_model = None
+        self._clear_memory()
         
         total_time = time.time() - total_start_time
         logger.info(f"✅ Done! Processing completed in {total_time:.2f} seconds")
@@ -560,21 +549,179 @@ class AudioTranslator:
             except Exception as e:
                 logger.warning(f"Failed to remove temporary file {file_path}: {e}")
         self.temp_files = []
+    
+    def unload_models(self):
+        """Manually unload all models to free memory."""
+        logger.info("Unloading all models to free memory")
+        self._whisper_model = None
+        self._tts_model = None
+        self._gemini_model = None
+        self._clear_memory()
+
+
+class StreamingAudioTranslator(OptimizedAudioTranslator):
+    """
+    Enhanced version that implements streaming pipeline processing.
+    Each step starts as soon as data is available from the previous step.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.results_queue = {}
+        self._lock = threading.Lock()
+    
+    def _transcription_worker(self, job_id, input_audio, callback=None):
+        """Worker thread for transcription."""
+        try:
+            # Convert and transcribe
+            input_wav = self.convert_to_wav(input_audio)
+            transcribed_text = self.transcribe_audio(input_wav)
+            
+            # Store results
+            with self._lock:
+                self.results_queue[job_id] = {
+                    "input_wav": input_wav,
+                    "transcribed_text": transcribed_text,
+                    "status": "transcribed"
+                }
+            
+            # Callback if provided
+            if callback:
+                callback(job_id, "transcription", transcribed_text)
+            
+            # Unload whisper model
+            self._whisper_model = None
+            self._clear_memory()
+            
+            # Start translation
+            threading.Thread(
+                target=self._translation_worker, 
+                args=(job_id, transcribed_text, callback)
+            ).start()
+            
+        except Exception as e:
+            logger.error(f"Transcription error for job {job_id}: {e}")
+            with self._lock:
+                self.results_queue[job_id]["status"] = "error"
+                self.results_queue[job_id]["error"] = str(e)
+    
+    def _translation_worker(self, job_id, text, callback=None, target_lang="hi"):
+        """Worker thread for translation."""
+        try:
+            # Translate
+            translated_text = self.translate_text(text, target_lang)
+            
+            # Store results
+            with self._lock:
+                self.results_queue[job_id]["translated_text"] = translated_text
+                self.results_queue[job_id]["status"] = "translated"
+            
+            # Callback if provided
+            if callback:
+                callback(job_id, "translation", translated_text)
+            
+            # Start voice cloning
+            input_wav = self.results_queue[job_id]["input_wav"]
+            
+            threading.Thread(
+                target=self._tts_worker, 
+                args=(job_id, input_wav, translated_text, target_lang, callback)
+            ).start()
+            
+        except Exception as e:
+            logger.error(f"Translation error for job {job_id}: {e}")
+            with self._lock:
+                self.results_queue[job_id]["status"] = "error"
+                self.results_queue[job_id]["error"] = str(e)
+    
+    def _tts_worker(self, job_id, input_wav, translated_text, target_lang, callback=None):
+        """Worker thread for TTS."""
+        try:
+            # Clone voice
+            audio_parts, combined_audio = self.clone_voice_xtts_optimized(
+                input_wav, translated_text, target_lang
+            )
+            
+            # Store results
+            with self._lock:
+                self.results_queue[job_id]["audio_parts"] = audio_parts
+                self.results_queue[job_id]["combined_audio"] = combined_audio
+                self.results_queue[job_id]["status"] = "completed"
+            
+            # Callback if provided
+            if callback:
+                callback(job_id, "tts", combined_audio)
+            
+            # Unload TTS model
+            self._tts_model = None
+            self._clear_memory()
+            
+        except Exception as e:
+            logger.error(f"TTS error for job {job_id}: {e}")
+            with self._lock:
+                self.results_queue[job_id]["status"] = "error"
+                self.results_queue[job_id]["error"] = str(e)
+    
+    def process_streaming(self, input_audio, target_lang="hi", callback=None):
+        """
+        Process audio with a streaming pipeline architecture.
+        
+        Args:
+            input_audio (str): Path to the input audio file.
+            target_lang (str): Target language code. Default is "hi" (Hindi).
+            callback (callable): Function to call with updates. Takes (job_id, stage, data).
+            
+        Returns:
+            str: Job ID for tracking the process.
+        """
+        # Generate job ID
+        job_id = f"job_{int(time.time())}"
+        
+        # Initialize job
+        with self._lock:
+            self.results_queue[job_id] = {
+                "status": "started",
+                "start_time": time.time()
+            }
+        
+        # Start the pipeline
+        threading.Thread(
+            target=self._transcription_worker, 
+            args=(job_id, input_audio, callback)
+        ).start()
+        
+        return job_id
+    
+    def get_job_status(self, job_id):
+        """
+        Get the status of a job.
+        
+        Args:
+            job_id (str): Job ID.
+            
+        Returns:
+            dict: Job status and results.
+        """
+        with self._lock:
+            if job_id in self.results_queue:
+                return self.results_queue[job_id]
+            else:
+                return {"status": "not_found"}
+
 
 def main():
     """Main function to run the script from command line."""
-    parser = argparse.ArgumentParser(description="Audio Translation Pipeline")
+    parser = argparse.ArgumentParser(description="Optimized Audio Translation Pipeline")
     parser.add_argument("input_audio", help="Path to the input audio file")
     parser.add_argument("--target-lang", "-t", default="hi", help="Target language code (default: hi)")
     parser.add_argument("--output-dir", "-o", help="Output directory (default: output_audio)")
     parser.add_argument("--chunk-size", "-c", type=int, default=250, 
                         help="Maximum character length for TTS chunks (default: 250)")
-    parser.add_argument("--whisper-model", "-w", default="base", 
+    parser.add_argument("--whisper-model", "-w", default="medium", 
                         choices=["tiny", "base", "small", "medium", "large"],
-                        help="Whisper model size (default: base)")
-    parser.add_argument("--no-parallel", action="store_true", help="Disable parallel processing")
-    parser.add_argument("--max-workers", type=int, help="Maximum number of workers for parallel processing")
-    parser.add_argument("--no-memory-optimization", action="store_true", help="Disable memory optimization")
+                        help="Whisper model size (default: medium)")
+    parser.add_argument("--no-gpu", action="store_true", help="Disable GPU processing")
+    parser.add_argument("--streaming", action="store_true", help="Use streaming pipeline architecture")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     
@@ -583,29 +730,67 @@ def main():
     if args.verbose:
         logger.setLevel(logging.DEBUG)
     
-    translator = AudioTranslator(
-        output_path=args.output_dir,
-        chunk_size=args.chunk_size,
-        cleanup_temp=not args.keep_temp,
-        parallel_processing=not args.no_parallel,
-        max_workers=args.max_workers,
-        optimize_memory=not args.no_memory_optimization,
-        whisper_model_size=args.whisper_model
-    )
-    
-    try:
-        results = translator.translate_and_clone(args.input_audio, args.target_lang)
+    if args.streaming:
+        # Use streaming architecture
+        translator = StreamingAudioTranslator(
+            output_path=args.output_dir,
+            chunk_size=args.chunk_size,
+            cleanup_temp=not args.keep_temp,
+            whisper_model_size=args.whisper_model,
+            use_gpu=not args.no_gpu
+        )
         
-        print("\n--- Results ---")
-        print(f"Original text: {results['original_text'][:100]}...")
-        print(f"Translated text: {results['translated_text'][:100]}...")
-        print(f"Combined audio: {results['combined_audio']}")
-        print(f"Processing time: {results['processing_time_seconds']:.2f} seconds")
-    except Exception as e:
-        logger.error(f"Error during processing: {e}")
-        return 1
-    
-    return 0
-
-if __name__ == "__main__":
-    exit(main())
+        # Define callback function to display progress
+        def update_callback(job_id, stage, data):
+            if stage == "transcription":
+                print(f"\n--- Transcription Completed ---")
+                print(f"Text: {data[:100]}...")
+            elif stage == "translation":
+                print(f"\n--- Translation Completed ---")
+                print(f"Text: {data[:100]}...")
+            elif stage == "tts":
+                print(f"\n--- Voice Cloning Completed ---")
+                print(f"Audio saved to: {data}")
+        
+        # Start streaming process
+        job_id = translator.process_streaming(args.input_audio, args.target_lang, update_callback)
+        print(f"Started streaming job with ID: {job_id}")
+        
+        # Wait for job to complete
+        while True:
+            status = translator.get_job_status(job_id)
+            if status["status"] in ["completed", "error"]:
+                break
+            time.sleep(1)
+            
+        # Display final results
+        if status["status"] == "completed":
+            print("\n--- Final Results ---")
+            print(f"Original text: {status['transcribed_text'][:100]}...")
+            print(f"Translated text: {status['translated_text'][:100]}...")
+            print(f"Combined audio: {status['combined_audio']}")
+            print(f"Processing time: {time.time() - status['start_time']:.2f} seconds")
+        else:
+            print(f"\nError: {status.get('error', 'Unknown error')}")
+            
+    else:
+        # Use standard architecture
+        translator = OptimizedAudioTranslator(
+            output_path=args.output_dir,
+            chunk_size=args.chunk_size,
+            cleanup_temp=not args.keep_temp,
+            whisper_model_size=args.whisper_model,
+            use_gpu=not args.no_gpu
+        )
+        
+        try:
+            start_time = time.time()
+            results = translator.translate_and_clone(args.input_audio, args.target_lang)
+            
+            print("\n--- Results ---")
+            print(f"Original text: {results['original_text'][:100]}...")
+            print(f"Translated text: {results['translated_text'][:100]}...")
+            print(f"Combined audio: {results['combined_audio']}")
+            print(f"Processing time: {time.time() - start_time:.2f} seconds")
+        except Exception as e:
+            logger.error(f"Error during processing: {e}")

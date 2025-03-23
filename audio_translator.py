@@ -29,6 +29,53 @@ logger = logging.getLogger(__name__)
 # Allow XTTS config classes to be safely unpickled
 torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
 
+
+# Standalone function for parallel processing
+def process_tts_chunk_standalone(chunk_data):
+    """
+    Standalone function to process a single TTS chunk (for parallel processing).
+    
+    Args:
+        chunk_data (tuple): Tuple containing (chunk_index, chunk_text, input_audio, target_lang, part_path, device, optimize_memory).
+        
+    Returns:
+        tuple: Tuple containing (chunk_index, part_path).
+    """
+    chunk_index, chunk_text, input_audio, target_lang, part_path, device, optimize_memory = chunk_data
+    
+    try:
+        logger.info(f"Synthesizing part {chunk_index+1}...")
+        start_time = time.time()
+        
+        # Create a local TTS model instance
+        local_tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
+        if device == "cuda":
+            # Use a specific GPU if available
+            local_tts = local_tts.to("cuda")
+        
+        local_tts.tts_to_file(
+            text=chunk_text,
+            speaker_wav=input_audio,
+            language=target_lang,
+            file_path=part_path,
+        )
+        
+        synthesis_time = time.time() - start_time
+        logger.info(f"Part {chunk_index+1} synthesized in {synthesis_time:.2f} seconds")
+        
+        # Clear memory if optimizing
+        if optimize_memory and device == "cuda":
+            del local_tts
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+        return chunk_index, part_path
+    except Exception as e:
+        logger.error(f"Error processing chunk {chunk_index+1}: {e}")
+        return chunk_index, None
+
+
 class AudioTranslator:
     def __init__(self, output_path=None, chunk_size=250, cleanup_temp=True, 
                  parallel_processing=True, max_workers=None, optimize_memory=True,
@@ -349,7 +396,7 @@ class AudioTranslator:
     
     def process_tts_chunk(self, chunk_data):
         """
-        Process a single TTS chunk (for parallel processing).
+        Process a single TTS chunk (for sequential processing).
         
         Args:
             chunk_data (tuple): Tuple containing (chunk_index, chunk_text, input_audio, target_lang, part_path).
@@ -363,34 +410,18 @@ class AudioTranslator:
             logger.info(f"Synthesizing part {chunk_index+1}...")
             start_time = time.time()
             
-            # Create a local TTS model instance if parallel processing
-            if self.parallel_processing:
-                local_tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
-                if self.device == "cuda":
-                    # Use a specific GPU if available
-                    local_tts = local_tts.to("cuda")
-                
-                local_tts.tts_to_file(
-                    text=chunk_text,
-                    speaker_wav=input_audio,
-                    language=target_lang,
-                    file_path=part_path,
-                )
-            else:
-                self.tts_model.tts_to_file(
-                    text=chunk_text,
-                    speaker_wav=input_audio,
-                    language=target_lang,
-                    file_path=part_path,
-                )
+            self.tts_model.tts_to_file(
+                text=chunk_text,
+                speaker_wav=input_audio,
+                language=target_lang,
+                file_path=part_path,
+            )
             
             synthesis_time = time.time() - start_time
             logger.info(f"Part {chunk_index+1} synthesized in {synthesis_time:.2f} seconds")
             
             # Clear memory if optimizing
             if self.optimize_memory and self.device == "cuda":
-                if self.parallel_processing:
-                    del local_tts
                 self._clear_memory()
                 
             return chunk_index, part_path
@@ -415,26 +446,30 @@ class AudioTranslator:
         text_chunks = self.smart_split_text(translated_text)
         
         # Prepare chunk data for processing
-        chunk_data = []
         part_paths = [None] * len(text_chunks)  # Preallocate to maintain order
-        
-        for i, chunk in enumerate(text_chunks):
-            part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
-            chunk_data.append((i, chunk, input_audio, target_lang, part_path))
         
         # Process chunks
         if self.parallel_processing and len(text_chunks) > 1:
+            # Prepare data for parallel processing
+            chunk_data = []
+            for i, chunk in enumerate(text_chunks):
+                part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
+                # Include device and optimize_memory in the chunk data for the standalone function
+                chunk_data.append((i, chunk, input_audio, target_lang, part_path, self.device, self.optimize_memory))
+            
             # Use parallel processing for multiple chunks
             with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                for chunk_index, part_path in executor.map(self.process_tts_chunk, chunk_data):
+                # Use the standalone function instead of the class method
+                for chunk_index, part_path in executor.map(process_tts_chunk_standalone, chunk_data):
                     if part_path:
                         part_paths[chunk_index] = part_path
         else:
-            # Process sequentially
-            for data in chunk_data:
-                chunk_index, part_path = self.process_tts_chunk(data)
+            # Process sequentially using the class method
+            for i, chunk in enumerate(text_chunks):
+                part_path = os.path.join(self.output_path, f"cloned_audio_part_{i + 1}.wav")
+                chunk_index, part_path = self.process_tts_chunk((i, chunk, input_audio, target_lang, part_path))
                 if part_path:
-                    part_paths[chunk_index] = part_path
+                    part_paths[i] = part_path
         
         # Filter out any None values (failed chunks)
         cloned_audio_paths = [path for path in part_paths if path]
@@ -488,7 +523,7 @@ class AudioTranslator:
         
         # Step 2: Transcribe
         original_text = self.transcribe_audio(input_wav)
-        logger.info("📄 Original Text:", extra={"text": original_text})
+        logger.info(f"📄 Original Text: {original_text[:100]}...")
         
         # Clear memory after transcription
         if self.optimize_memory:
@@ -496,7 +531,7 @@ class AudioTranslator:
         
         # Step 3: Translate
         translated_text = self.translate_text(original_text, target_lang)
-        logger.info("🌐 Translated Text:", extra={"text": translated_text})
+        logger.info(f"🌐 Translated Text: {translated_text[:100]}...")
         
         # Step 4: Clone voice
         audio_parts, combined_audio = self.clone_voice_xtts(input_wav, translated_text, target_lang)

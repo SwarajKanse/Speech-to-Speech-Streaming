@@ -14,7 +14,7 @@ except ImportError:
     import torch
 
 class AdvancedTranscriber:
-    def __init__(self, model_size='distil-medium', device=None):
+    def __init__(self, model_size='medium', device=None):
         """
         Initialize transcription with optimized settings.
         
@@ -86,15 +86,23 @@ class AdvancedTranscriber:
             traceback.print_exc()
             return ""
 
-    def save_transcription(self, transcription, output_path='transcription.txt'):
+    def save_transcription(self, transcription, script_dir=None, output_filename='transcription.txt'):
         """
-        Save transcription to a text file.
+        Save transcription to a text file in the script's directory.
         
         Args:
             transcription (str): Transcribed text
-            output_path (str): Path to save transcription
+            script_dir (str, optional): Directory to save the file
+            output_filename (str): Name of the output file
         """
         try:
+            # If no directory provided, use current script's directory
+            if script_dir is None:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Create full path for output file
+            output_path = os.path.join(script_dir, output_filename)
+            
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(transcription)
             print(f"Transcription saved to: {output_path}")
@@ -137,14 +145,14 @@ def main():
     print(f"Found audio file: {audio_path}")
 
     # Initialize transcriber
-    transcriber = AdvancedTranscriber(model_size='distil-medium')
+    transcriber = AdvancedTranscriber(model_size='medium')
 
     # Transcribe audio (auto-detect language)
     transcription = transcriber.transcribe(audio_path)
 
-    # Save transcription
+    # Save transcription in the same directory as the script
     if transcription:
-        transcriber.save_transcription(transcription)
+        transcriber.save_transcription(transcription, script_dir)
     else:
         print("No transcription generated.")
 

@@ -76,17 +76,22 @@ class VideoTranslator:
             # Fallback to Google Translate if Gemini fails
             return self.google_translator.translate(text, dest=target_language).text
 
-    def translate_transcription(self, transcription_path, target_language):
+    def translate_transcription(self, transcription_path, target_language, script_dir=None):
         """
         Translate entire transcription file.
         
         Args:
             transcription_path (str): Path to transcription text file
             target_language (str): Target language code
+            script_dir (str, optional): Directory to save translated file
         
         Returns:
             str: Path to translated transcription file
         """
+        # If no directory provided, use current script's directory
+        if script_dir is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+
         # Read transcription
         try:
             with open(transcription_path, 'r', encoding='utf-8') as f:
@@ -98,8 +103,12 @@ class VideoTranslator:
         # Translate transcription
         translated_text = self.translate_text(transcription_text, target_language)
 
+        # Generate translated filename in the script's directory
+        original_filename = os.path.basename(transcription_path)
+        translated_filename = original_filename.replace('.txt', f'_{target_language}.txt')
+        translated_path = os.path.join(script_dir, translated_filename)
+
         # Write translated transcription
-        translated_path = transcription_path.replace('.txt', f'_{target_language}.txt')
         try:
             with open(translated_path, 'w', encoding='utf-8') as f:
                 f.write(translated_text)
@@ -111,18 +120,22 @@ class VideoTranslator:
 
 # Example usage
 def main():
+    # Get the directory of the current script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
     # Configuration
-    transcription_path = "transcription.txt"
+    transcription_path = os.path.join(script_dir, "transcription.txt")
     target_language = "fr"  # French as an example
 
     try:
         # Initialize translator with Gemini 1.5 Flash
         translator = VideoTranslator()
 
-        # Translate transcription
+        # Translate transcription, saving in the script's directory
         translated_path = translator.translate_transcription(
             transcription_path, 
-            target_language
+            target_language,
+            script_dir
         )
 
         if translated_path:

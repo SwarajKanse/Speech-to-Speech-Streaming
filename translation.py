@@ -125,7 +125,7 @@ def main():
 
     # Configuration
     transcription_path = os.path.join(script_dir, "transcription.txt")
-    target_language = "fr"  # French as an example
+    target_language = "hi"  # Hindi as an example
 
     try:
         # Initialize translator with Gemini 1.5 Flash

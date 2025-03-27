@@ -1,0 +1,7 @@
+ffmpeg-python
+faster-whisper
+googletrans==3.1.0a0
+requests
+python-dotenv
+elevenlabs
+yt-dlp

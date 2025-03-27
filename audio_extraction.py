@@ -1,59 +1,54 @@
 import os
-import sys
-import subprocess
+import ffmpeg
 
-def extract_audio(input_video=None, output_audio='input_audio.wav'):
+# Ensure the temp directory exists
+TEMP_DIR = 'temp'
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+def extract_audio(video_path):
     """
-    Extract audio from a video file using ffmpeg.
+    Extract audio from a video file using FFmpeg.
     
     Args:
-    input_video (str, optional): Path to the input video file.
-    output_audio (str, optional): Name of the output audio file.
+        video_path (str): Path to the input video file
+    
+    Returns:
+        str: Path to the extracted audio file
     """
-    # Get the directory of the current script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Full path for output audio in the same directory as the script
-    output_path = os.path.join(script_dir, output_audio)
-    
-    # If no input video is provided, prompt user
-    while not input_video or not os.path.exists(input_video):
-        if input_video:
-            print(f"Error: File '{input_video}' not found.")
-        
-        input_video = input("Please enter the full path to your video file: ").strip()
-        # Remove quotes if user accidentally included them
-        input_video = input_video.strip("'\"")
-    
     try:
-        # Extract audio using ffmpeg
-        subprocess.run(['ffmpeg', '-i', input_video, '-q:a', '0', '-map', 'a', output_path], 
-                       check=True, 
-                       stderr=subprocess.PIPE)
+        # Generate output audio filename
+        video_filename = os.path.splitext(os.path.basename(video_path))[0]
+        audio_filename = f"{video_filename}_audio.wav"
+        audio_path = os.path.join(TEMP_DIR, audio_filename)
         
-        print(f"Audio successfully extracted to: {output_path}")
-        return output_path
+        # Use FFmpeg to extract audio
+        (
+            ffmpeg
+            .input(video_path)
+            .output(audio_path, acodec='pcm_s16le', ac=1, ar='16000')
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+        
+        print(f"Audio extracted successfully: {audio_path}")
+        return audio_path
     
-    except subprocess.CalledProcessError as e:
-        print("Error extracting audio:")
-        print(e.stderr.decode() if e.stderr else "Unknown error occurred")
+    except ffmpeg.Error as e:
+        print(f"FFmpeg Error: {e.stderr.decode()}")
         return None
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"Error extracting audio: {e}")
         return None
 
 def main():
-    # Allow passing video file as command-line argument
-    if len(sys.argv) > 1:
-        video_file = sys.argv[1]
-    else:
-        video_file = None
-    
-    # Extract audio
-    extracted_audio = extract_audio(video_file)
+    # Example usage
+    video_path = input("Enter the path to the video file: ")
+    extracted_audio = extract_audio(video_path)
     
     if extracted_audio:
-        print(f"Audio extraction complete. File saved as: {extracted_audio}")
+        print(f"Audio extracted to: {extracted_audio}")
+    else:
+        print("Audio extraction failed.")
 
 if __name__ == "__main__":
     main()

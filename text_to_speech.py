@@ -75,52 +75,69 @@ class TranslatedTextToSpeech:
         
         return sentences
 
-    def _preprocess_voice_samples(self, voice_samples_path):
+    def _clone_voice_samples(self, voice_samples_path):
         """
-        Preprocess voice samples for Tortoise TTS.
+        Clone voice samples for Tortoise TTS with multiple variations.
         
         Args:
             voice_samples_path (str): Path to input audio file
         
         Returns:
-            torch.Tensor: Preprocessed voice samples
+            list: List of cloned voice sample tensors
         """
-        # Load voice samples
-        voice_samples, sr = torchaudio.load(voice_samples_path)
+        try:
+            # Load original voice samples
+            voice_samples, sr = torchaudio.load(voice_samples_path)
+            
+            # Ensure audio is mono
+            if voice_samples.ndim > 1:
+                voice_samples = voice_samples.mean(dim=0, keepdim=True)
+            
+            # Resample if necessary (Tortoise expects 24kHz)
+            if sr != 24000:
+                resampler = torchaudio.transforms.Resample(sr, 24000)
+                voice_samples = resampler(voice_samples)
+            
+            # Ensure 2D tensor with shape [1, num_samples]
+            voice_samples = voice_samples.squeeze()
+            
+            # Ensure minimum length for voice samples
+            min_length = 24000 * 5  # 5 seconds minimum
+            max_length = 24000 * 60  # Max 1 minute
+            
+            if voice_samples.numel() < min_length:
+                # Repeat the sample to meet minimum length
+                repeats = (min_length // voice_samples.numel()) + 1
+                voice_samples = voice_samples.repeat(repeats)
+            
+            # Truncate to a reasonable length
+            voice_samples = voice_samples[:max_length]
+            
+            # Create multiple variations of the voice sample
+            voice_variations = []
+            
+            # Original sample
+            voice_variations.append(voice_samples.unsqueeze(0))
+            
+            # Add some variations by slightly modifying the original sample
+            for _ in range(2):
+                # Create a slightly modified version by adding low-level noise
+                noisy_sample = voice_samples + torch.randn_like(voice_samples) * 0.01
+                voice_variations.append(noisy_sample.unsqueeze(0))
+            
+            return voice_variations
         
-        # Ensure audio is mono
-        if voice_samples.shape[0] > 1:
-            voice_samples = voice_samples.mean(dim=0, keepdim=True)
-        
-        # Resample if necessary (Tortoise expects 24kHz)
-        if sr != 24000:
-            resampler = torchaudio.transforms.Resample(sr, 24000)
-            voice_samples = resampler(voice_samples)
-        
-        # Ensure 2D tensor with shape [1, num_samples]
-        voice_samples = voice_samples.squeeze(0)
-        
-        # Make sure the sample is long enough
-        min_length = 24000 * 5  # 5 seconds minimum
-        if voice_samples.shape[0] < min_length:
-            # Repeat the sample to meet minimum length
-            repeats = (min_length // voice_samples.shape[0]) + 1
-            voice_samples = voice_samples.repeat(repeats)
-        
-        # Truncate to a reasonable length
-        max_length = 24000 * 60  # Max 1 minute
-        voice_samples = voice_samples[:max_length]
-        
-        # Reshape to [1, num_samples]
-        voice_samples = voice_samples.unsqueeze(0)
-        
-        return voice_samples
+        except Exception as e:
+            print(f"Error cloning voice samples: {e}")
+            # Create default noise tensors if voice sample loading fails
+            default_samples = [torch.randn(1, 24000 * 5) for _ in range(3)]
+            return default_samples
 
     def text_to_speech(self, 
                        text_file_path, 
                        voice_samples_path="D:\\Infosys Springboard\\Basic Project\\input_audio.wav"):
         """
-        Convert translated text to speech using Tortoise TTS with segmentation.
+        Convert translated text to speech using Tortoise TTS with voice cloning.
         
         Args:
             text_file_path (str): Path to translated text file
@@ -143,8 +160,8 @@ class TranslatedTextToSpeech:
         output_path = self.output_dir / audio_filename
 
         try:
-            # Preprocess voice samples
-            voice_samples = self._preprocess_voice_samples(voice_samples_path)
+            # Clone voice samples with multiple variations
+            voice_samples_list = self._clone_voice_samples(voice_samples_path)
             
             # Split text into segments
             text_segments = self._split_text(text)
@@ -152,9 +169,12 @@ class TranslatedTextToSpeech:
             # Prepare list to concatenate audio segments
             audio_segments = []
 
-            # Generate speech for each segment
+            # Generate speech for each segment using different voice sample variations
             for i, segment in enumerate(text_segments):
                 print(f"Generating segment {i+1}/{len(text_segments)}: {segment[:50]}...")
+                
+                # Cycle through voice sample variations
+                voice_samples = voice_samples_list[i % len(voice_samples_list)]
                 
                 # Generate with voice cloning
                 gen = self.tts.tts_with_preset(
@@ -183,25 +203,21 @@ def main():
     # Get the directory of the current script
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Configuration
-    transcription_path = os.path.join(script_dir, "transcription.txt")
-    target_language = "fr"  # French as an example
+    # Find the most recently created translated file
+    translated_files = [f for f in os.listdir(script_dir) if f.endswith('_fr.txt')]
+    
+    if not translated_files:
+        print("No translated files found. Run translation first.")
+        return
+
+    # Use the most recently created translated file
+    translated_path = os.path.join(script_dir, max(translated_files, key=lambda f: os.path.getctime(os.path.join(script_dir, f))))
+    
+    # Path to input audio for voice cloning
     voice_samples_path = "D:\\Infosys Springboard\\Basic Project\\input_audio.wav"
     
     try:
-        # Step 1: Translate transcription
-        translator = VideoTranslator()
-        translated_path = translator.translate_transcription(
-            transcription_path, 
-            target_language,
-            script_dir
-        )
-
-        if not translated_path:
-            print("Translation failed.")
-            return
-
-        # Step 2: Convert translated text to speech
+        # Convert translated text to speech
         tts_generator = TranslatedTextToSpeech(
             output_dir=script_dir, 
             max_segment_length=250  # Adjust this value as needed

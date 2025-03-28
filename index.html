@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech-to-Speech Translation</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        body {
+            background-color: #f4f4f4;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 400px;
+            padding: 30px;
+        }
+        .title {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #333;
+            font-size: 24px;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+        }
+        .file-input-wrapper {
+            display: flex;
+            align-items: center;
+        }
+        #fileInput {
+            display: none;
+        }
+        .file-upload-btn {
+            flex-grow: 1;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .clear-btn {
+            background-color: #f44336;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #youtubeUrl {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        #languageSelect {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        #translateBtn {
+            width: 100%;
+            padding: 12px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #translateBtn:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #resultSection {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #translatedVideo {
+            max-width: 100%;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+        #downloadBtn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">Speech Translation</h1>
+        
+        <div class="input-group">
+            <label>Upload Video or YouTube URL</label>
+            <div class="file-input-wrapper">
+                <input type="file" id="fileInput" accept="video/*">
+                <button id="uploadBtn" class="file-upload-btn">Upload Video</button>
+                <button id="clearFileBtn" class="clear-btn" style="display:none;">✕</button>
+            </div>
+        </div>
+
+        <div class="input-group">
+            <input type="text" id="youtubeUrl" placeholder="Or paste YouTube URL">
+        </div>
+
+        <div class="input-group">
+            <label>Target Language</label>
+            <select id="languageSelect">
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="ja">Japanese</option>
+                <option value="zh">Chinese</option>
+                <option value="ar">Arabic</option>
+            </select>
+        </div>
+
+        <button id="translateBtn" disabled>Translate Video</button>
+
+        <div id="resultSection" style="display:none;">
+            <video id="translatedVideo" controls></video>
+            <button id="downloadBtn">Download Translated Video</button>
+        </div>
+    </div>
+
+    <script>
+        // DOM Element Selections
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const clearFileBtn = document.getElementById('clearFileBtn');
+        const youtubeUrlInput = document.getElementById('youtubeUrl');
+        const languageSelect = document.getElementById('languageSelect');
+        const translateBtn = document.getElementById('translateBtn');
+        const resultSection = document.getElementById('resultSection');
+        const translatedVideo = document.getElementById('translatedVideo');
+        const downloadBtn = document.getElementById('downloadBtn');
+
+        let selectedFile = null;
+
+        // Event Listeners
+        uploadBtn.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', (e) => {
+            selectedFile = e.target.files[0];
+            uploadBtn.textContent = selectedFile ? selectedFile.name : 'Upload Video';
+            clearFileBtn.style.display = selectedFile ? 'block' : 'none';
+            validateInputs();
+        });
+
+        clearFileBtn.addEventListener('click', () => {
+            fileInput.value = '';
+            selectedFile = null;
+            uploadBtn.textContent = 'Upload Video';
+            clearFileBtn.style.display = 'none';
+            validateInputs();
+        });
+
+        youtubeUrlInput.addEventListener('input', validateInputs);
+        languageSelect.addEventListener('change', validateInputs);
+
+        translateBtn.addEventListener('click', translateVideo);
+        downloadBtn.addEventListener('click', downloadVideo);
+
+        function validateInputs() {
+            const hasFile = selectedFile !== null;
+            const hasYoutubeUrl = youtubeUrlInput.value.trim() !== '';
+            const hasLanguage = languageSelect.value !== '';
+
+            translateBtn.disabled = !(hasFile || hasYoutubeUrl);
+        }
+
+async function translateVideo() {
+    translateBtn.disabled = true;
+    translateBtn.textContent = 'Translating...';
+    resultSection.style.display = 'none';
+
+    try {
+        const formData = new FormData();
+        
+        if (selectedFile) {
+            formData.append('video', selectedFile);
+        } else if (youtubeUrlInput.value) {
+            formData.append('youtube_url', youtubeUrlInput.value);
+        }
+        
+        formData.append('target_language', languageSelect.value);
+
+        // Change the fetch URL to match your Flask backend
+        const response = await fetch('http://localhost:5000/api/translate-video', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (response.ok) {
+            // Create a blob URL for the video
+            const blob = await response.blob();
+            const videoUrl = URL.createObjectURL(blob);
+            translatedVideo.src = videoUrl;
+            resultSection.style.display = 'block';
+        } else {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Translation failed');
+        }
+    } catch (error) {
+        console.error('Translation error:', error);
+        alert(error.message || 'Video translation failed. Please try again.');
+    } finally {
+        translateBtn.disabled = false;
+        translateBtn.textContent = 'Translate Video';
+    }
+}
+
+        function downloadVideo() {
+            if (translatedVideo.src) {
+                const link = document.createElement('a');
+                link.href = translatedVideo.src;
+                link.download = 'translated_video.mp4';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+        }
+    </script>
+</body>
+</html>

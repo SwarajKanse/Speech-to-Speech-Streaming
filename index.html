@@ -4,107 +4,161 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Translation App</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
     <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2ecc71;
+            --background-color: #f4f6f7;
+            --text-color: #2c3e50;
+            --border-radius: 12px;
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: 'Arial', sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
         }
+
         body {
-            background-color: #f4f4f4;
+            background-color: var(--background-color);
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
             padding: 20px;
             line-height: 1.6;
+            color: var(--text-color);
         }
+
         .container {
             background-color: white;
-            border-radius: 12px;
-            box-shadow: 0 6px 12px rgba(0,0,0,0.1);
+            border-radius: var(--border-radius);
+            box-shadow: 0 15px 35px rgba(0,0,0,0.1);
             width: 100%;
-            max-width: 450px;
-            padding: 35px;
+            max-width: 500px;
+            padding: 40px;
+            transition: transform 0.3s ease;
         }
+
+        .container:hover {
+            transform: translateY(-5px);
+        }
+
         .title {
             text-align: center;
-            margin-bottom: 25px;
-            color: #333;
-            font-size: 26px;
-            font-weight: bold;
+            margin-bottom: 30px;
+            color: var(--primary-color);
+            font-size: 28px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
         }
+
+        .title i {
+            color: var(--secondary-color);
+        }
+
         .input-group {
-            margin-bottom: 20px;
+            margin-bottom: 25px;
         }
+
         .input-group label {
             display: block;
-            margin-bottom: 8px;
-            color: #555;
+            margin-bottom: 10px;
+            color: var(--text-color);
             font-weight: 600;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
+
         .file-input-wrapper {
             display: flex;
             align-items: center;
             gap: 10px;
         }
+
         #fileInput {
             display: none;
         }
+
         .file-upload-btn {
             flex-grow: 1;
-            padding: 12px;
-            background-color: #4CAF50;
+            padding: 12px 15px;
+            background-color: var(--primary-color);
             color: white;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
-            transition: background-color 0.3s ease;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
         }
+
         .file-upload-btn:hover {
-            background-color: #45a049;
+            background-color: #2980b9;
+            box-shadow: 0 4px 15px rgba(52, 152, 219, 0.3);
         }
+
         .clear-btn {
-            background-color: #f44336;
+            background-color: #e74c3c;
             color: white;
             border: none;
             padding: 12px;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
             transition: background-color 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
+
         .clear-btn:hover {
-            background-color: #d32f2f;
+            background-color: #c0392b;
         }
-        #youtubeUrl {
+
+        #youtubeUrl, #languageSelect {
             width: 100%;
             padding: 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
             margin-top: 10px;
+            transition: border-color 0.3s ease;
         }
-        #languageSelect {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
+
+        #youtubeUrl:focus, #languageSelect:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
         }
+
         #translateBtn {
             width: 100%;
             padding: 15px;
-            background-color: #2196F3;
+            background-color: var(--secondary-color);
             color: white;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
-            transition: background-color 0.3s ease;
+            transition: all 0.3s ease;
             font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
         }
+
         #translateBtn:disabled {
             background-color: #b0b0b0;
             cursor: not-allowed;
         }
+
         #loading-overlay {
             position: fixed;
             top: 0;
@@ -117,17 +171,35 @@
             align-items: center;
             z-index: 1000;
         }
+
         .spinner {
-            width: 50px;
-            height: 50px;
-            border: 5px solid #f3f3f3;
-            border-top: 5px solid #3498db;
+            width: 60px;
+            height: 60px;
+            border: 6px solid #f3f3f3;
+            border-top: 6px solid var(--primary-color);
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
+
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 25px;
+                margin: 0 10px;
+            }
+
+            .file-input-wrapper {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .file-upload-btn, .clear-btn {
+                width: 100%;
+            }
         }
     </style>
 </head>
@@ -137,14 +209,21 @@
     </div>
 
     <div class="container">
-        <h1 class="title">Video Translation</h1>
+        <h1 class="title">
+            <i class="fas fa-language"></i>
+            Video Translation
+        </h1>
         
         <div class="input-group">
             <label>Upload Video or YouTube URL</label>
             <div class="file-input-wrapper">
                 <input type="file" id="fileInput" accept="video/*">
-                <button id="uploadBtn" class="file-upload-btn">Upload Video</button>
-                <button id="clearFileBtn" class="clear-btn" style="display:none;">✕</button>
+                <button id="uploadBtn" class="file-upload-btn">
+                    <i class="fas fa-upload"></i> Upload Video
+                </button>
+                <button id="clearFileBtn" class="clear-btn" style="display:none;">
+                    <i class="fas fa-times"></i>
+                </button>
             </div>
         </div>
 
@@ -154,7 +233,7 @@
 
         <div class="input-group">
             <label>Target Language</label>
-            <select id="languageSelect">
+<select id="languageSelect">
     <option value="en">English</option>
     <option value="es">Spanish</option>
     <option value="fr">French</option>
@@ -263,7 +342,9 @@
 </select>
         </div>
 
-        <button id="translateBtn" disabled>Translate Video</button>
+        <button id="translateBtn" disabled>
+            <i class="fas fa-globe"></i> Translate Video
+        </button>
     </div>
 
     <script>

@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speech-to-Speech Translation</title>
+    <title>Video Translation App</title>
     <style>
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: Arial, sans-serif;
+            font-family: 'Arial', sans-serif;
         }
         body {
             background-color: #f4f4f4;
@@ -18,102 +18,126 @@
             align-items: center;
             min-height: 100vh;
             padding: 20px;
+            line-height: 1.6;
         }
         .container {
             background-color: white;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            box-shadow: 0 6px 12px rgba(0,0,0,0.1);
             width: 100%;
-            max-width: 400px;
-            padding: 30px;
+            max-width: 450px;
+            padding: 35px;
         }
         .title {
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
             color: #333;
-            font-size: 24px;
+            font-size: 26px;
+            font-weight: bold;
         }
         .input-group {
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
         .input-group label {
             display: block;
-            margin-bottom: 5px;
-            color: #666;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
         }
         .file-input-wrapper {
             display: flex;
             align-items: center;
+            gap: 10px;
         }
         #fileInput {
             display: none;
         }
         .file-upload-btn {
             flex-grow: 1;
-            padding: 10px;
+            padding: 12px;
             background-color: #4CAF50;
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
-            margin-right: 10px;
+            transition: background-color 0.3s ease;
+        }
+        .file-upload-btn:hover {
+            background-color: #45a049;
         }
         .clear-btn {
             background-color: #f44336;
             color: white;
             border: none;
-            padding: 10px;
-            border-radius: 5px;
+            padding: 12px;
+            border-radius: 6px;
             cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        .clear-btn:hover {
+            background-color: #d32f2f;
         }
         #youtubeUrl {
             width: 100%;
-            padding: 10px;
+            padding: 12px;
             border: 1px solid #ddd;
-            border-radius: 5px;
+            border-radius: 6px;
+            margin-top: 10px;
         }
         #languageSelect {
             width: 100%;
-            padding: 10px;
+            padding: 12px;
             border: 1px solid #ddd;
-            border-radius: 5px;
+            border-radius: 6px;
         }
         #translateBtn {
             width: 100%;
-            padding: 12px;
+            padding: 15px;
             background-color: #2196F3;
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
-            transition: background-color 0.3s;
+            transition: background-color 0.3s ease;
+            font-weight: bold;
         }
         #translateBtn:disabled {
-            background-color: #ccc;
+            background-color: #b0b0b0;
             cursor: not-allowed;
         }
-        #resultSection {
-            margin-top: 20px;
-            text-align: center;
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
         }
-        #translatedVideo {
-            max-width: 100%;
-            border-radius: 5px;
-            margin-bottom: 15px;
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
         }
-        #downloadBtn {
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            padding: 10px 15px;
-            border-radius: 5px;
-            cursor: pointer;
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
 </head>
 <body>
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
     <div class="container">
-        <h1 class="title">Speech Translation</h1>
+        <h1 class="title">Video Translation</h1>
         
         <div class="input-group">
             <label>Upload Video or YouTube URL</label>
@@ -143,124 +167,95 @@
         </div>
 
         <button id="translateBtn" disabled>Translate Video</button>
-
-        <div id="resultSection" style="display:none;">
-            <video id="translatedVideo" controls></video>
-            <button id="downloadBtn">Download Translated Video</button>
-        </div>
     </div>
 
     <script>
-        // DOM Element Selections
-        const fileInput = document.getElementById('fileInput');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const clearFileBtn = document.getElementById('clearFileBtn');
-        const youtubeUrlInput = document.getElementById('youtubeUrl');
-        const languageSelect = document.getElementById('languageSelect');
-        const translateBtn = document.getElementById('translateBtn');
-        const resultSection = document.getElementById('resultSection');
-        const translatedVideo = document.getElementById('translatedVideo');
-        const downloadBtn = document.getElementById('downloadBtn');
+        // Wrap entire script in a self-executing function to prevent global scope pollution
+        (function() {
+            // DOM Element Selections
+            const fileInput = document.getElementById('fileInput');
+            const uploadBtn = document.getElementById('uploadBtn');
+            const clearFileBtn = document.getElementById('clearFileBtn');
+            const youtubeUrlInput = document.getElementById('youtubeUrl');
+            const languageSelect = document.getElementById('languageSelect');
+            const translateBtn = document.getElementById('translateBtn');
+            const loadingOverlay = document.getElementById('loading-overlay');
 
-        let selectedFile = null;
+            let selectedFile = null;
 
-        // Event Listeners
-        uploadBtn.addEventListener('click', () => fileInput.click());
+            // Event Listeners
+            uploadBtn.addEventListener('click', () => fileInput.click());
 
-        fileInput.addEventListener('change', (e) => {
-            selectedFile = e.target.files[0];
-            uploadBtn.textContent = selectedFile ? selectedFile.name : 'Upload Video';
-            clearFileBtn.style.display = selectedFile ? 'block' : 'none';
-            validateInputs();
-        });
+            fileInput.addEventListener('change', (e) => {
+                selectedFile = e.target.files[0];
+                uploadBtn.textContent = selectedFile ? selectedFile.name : 'Upload Video';
+                clearFileBtn.style.display = selectedFile ? 'block' : 'none';
+                validateInputs();
+            });
 
-        clearFileBtn.addEventListener('click', () => {
-            fileInput.value = '';
-            selectedFile = null;
-            uploadBtn.textContent = 'Upload Video';
-            clearFileBtn.style.display = 'none';
-            validateInputs();
-        });
+            clearFileBtn.addEventListener('click', () => {
+                fileInput.value = '';
+                selectedFile = null;
+                uploadBtn.textContent = 'Upload Video';
+                clearFileBtn.style.display = 'none';
+                validateInputs();
+            });
 
-        youtubeUrlInput.addEventListener('input', validateInputs);
-        languageSelect.addEventListener('change', validateInputs);
+            youtubeUrlInput.addEventListener('input', validateInputs);
+            languageSelect.addEventListener('change', validateInputs);
 
-        translateBtn.addEventListener('click', translateVideo);
-        downloadBtn.addEventListener('click', downloadVideo);
+            translateBtn.addEventListener('click', translateVideo);
 
-        function validateInputs() {
-            const hasFile = selectedFile !== null;
-            const hasYoutubeUrl = youtubeUrlInput.value.trim() !== '';
-            const hasLanguage = languageSelect.value !== '';
+            function validateInputs() {
+                const hasFile = selectedFile !== null;
+                const hasYoutubeUrl = youtubeUrlInput.value.trim() !== '';
+                const hasLanguage = languageSelect.value !== '';
 
-            translateBtn.disabled = !(hasFile || hasYoutubeUrl);
-        }
+                translateBtn.disabled = !(hasFile || hasYoutubeUrl);
+            }
 
-        async function translateVideo() {
-            translateBtn.disabled = true;
-            translateBtn.textContent = 'Translating...';
-            resultSection.style.display = 'none';
+            async function translateVideo() {
+                // Disable translate button and show loading overlay
+                translateBtn.disabled = true;
+                loadingOverlay.style.display = 'flex';
 
-            try {
-                const formData = new FormData();
-                
-                if (selectedFile) {
-                    formData.append('video', selectedFile);
-                } else if (youtubeUrlInput.value) {
-                    formData.append('youtube_url', youtubeUrlInput.value);
-                }
-                
-                formData.append('target_language', languageSelect.value);
-
-                const response = await fetch('http://localhost:5001/api/translate-video', {
-                    method: 'POST',
-                    body: formData,
-                    // Add these headers explicitly
-                    headers: {
-                        // Intentionally left blank to allow browser to set Content-Type with boundary
+                try {
+                    const formData = new FormData();
+                    
+                    if (selectedFile) {
+                        formData.append('video', selectedFile);
+                    } else if (youtubeUrlInput.value) {
+                        formData.append('youtube_url', youtubeUrlInput.value);
                     }
-                });
+                    
+                    formData.append('target_language', languageSelect.value);
 
-                console.log('Response status:', response.status);
+                    const response = await fetch('http://localhost:5001/api/translate-video', {
+                        method: 'POST',
+                        body: formData
+                    });
 
-                if (!response.ok) {
-                    // Try to parse error message from server
-                    const errorData = await response.json().catch(() => null);
-                    throw new Error(errorData?.error || 'Server responded with an error');
+                    // Hide loading overlay
+                    loadingOverlay.style.display = 'none';
+
+                    if (!response.ok) {
+                        throw new Error('Video translation failed');
+                    }
+
+                    // Redirect to result page
+                    window.location.href = 'result.html';
+
+                } catch (error) {
+                    // Hide loading overlay
+                    loadingOverlay.style.display = 'none';
+
+                    console.error('Translation error:', error);
+                    alert('Video translation failed. Please try again.');
+                } finally {
+                    translateBtn.disabled = false;
                 }
-
-                const blob = await response.blob();
-                const videoUrl = URL.createObjectURL(blob);
-                translatedVideo.src = videoUrl;
-                resultSection.style.display = 'block';
-            } catch (error) {
-                console.error('Complete error:', error);
-                
-                // More user-friendly error handling
-                let errorMessage = 'Video translation failed.';
-                if (error.message.includes('Failed to fetch')) {
-                    errorMessage += ' Unable to connect to the server. Please ensure the backend is running.';
-                } else {
-                    errorMessage += ` ${error.message}`;
-                }
-                
-                alert(errorMessage);
-            } finally {
-                translateBtn.disabled = false;
-                translateBtn.textContent = 'Translate Video';
             }
-        }
-
-        function downloadVideo() {
-            if (translatedVideo.src) {
-                const link = document.createElement('a');
-                link.href = translatedVideo.src;
-                link.download = 'translated_video.mp4';
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-            }
-        }
+        })();
     </script>
 </body>
 </html>

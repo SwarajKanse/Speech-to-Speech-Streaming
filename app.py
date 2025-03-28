@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-
+CORS(app)
 # More comprehensive CORS configuration
 CORS(app, resources={
     r"/api/*": {

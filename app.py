@@ -10,7 +10,13 @@ load_dotenv()
 
 app = Flask(__name__)
 # Configure CORS to allow all origins for development
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True
+    }
+})
 
 # Ensure temp directory exists
 TEMP_DIR = 'temp'
@@ -21,6 +27,7 @@ def translate_video():
     # Handle CORS preflight request
     if request.method == 'OPTIONS':
         response = jsonify(success=True)
+        response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Methods', 'POST')
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
         return response
@@ -41,6 +48,9 @@ def translate_video():
         elif 'youtube_url' in request.form:
             youtube_url = request.form['youtube_url']
             video_path = main.download_youtube_video(youtube_url)
+        
+        print("Received form data:", request.form)
+        print("Received files:", request.files)
         
         # Check if video was successfully obtained
         if not video_path:
@@ -64,9 +74,14 @@ def translate_video():
         if not final_video:
             return jsonify({"error": "Video translation failed"}), 500
         
-        # Return video file
+        # Explicitly use the known path
+        final_video_path = os.path.join('temp', 'final_translated_video.mp4')
+        
+        if not os.path.exists(final_video_path):
+            return jsonify({"error": "Translated video file not found"}), 500
+        
         return send_file(
-            final_video, 
+            final_video_path, 
             mimetype='video/mp4', 
             as_attachment=True, 
             download_name='translated_video.mp4'

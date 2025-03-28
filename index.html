@@ -212,24 +212,31 @@ async function translateVideo() {
         
         formData.append('target_language', languageSelect.value);
 
-        // Change the fetch URL to match your Flask backend
+        console.log('Sending request to:', 'http://localhost:5000/api/translate-video');
+        console.log('FormData contents:');
+        for (let [key, value] of formData.entries()) {
+            console.log(key, value);
+        }
+
         const response = await fetch('http://localhost:5000/api/translate-video', {
             method: 'POST',
             body: formData
         });
 
+        console.log('Response status:', response.status);
+
         if (response.ok) {
-            // Create a blob URL for the video
             const blob = await response.blob();
             const videoUrl = URL.createObjectURL(blob);
             translatedVideo.src = videoUrl;
             resultSection.style.display = 'block';
         } else {
             const errorData = await response.json();
+            console.error('Server error:', errorData);
             throw new Error(errorData.error || 'Translation failed');
         }
     } catch (error) {
-        console.error('Translation error:', error);
+        console.error('Complete error:', error);
         alert(error.message || 'Video translation failed. Please try again.');
     } finally {
         translateBtn.disabled = false;

@@ -1,6 +1,6 @@
 import os
 import uuid
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import main  # Import your main translation script
 from dotenv import load_dotenv
@@ -9,11 +9,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-# Configure CORS to allow all origins for development
+
+# More comprehensive CORS configuration
 CORS(app, resources={
     r"/api/*": {
-        "origins": "*",
-        "allow_headers": ["Content-Type", "Authorization"],
+        "origins": "*",  # Allow all origins
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": [
+            "Content-Type", 
+            "Authorization", 
+            "Access-Control-Allow-Credentials"
+        ],
         "supports_credentials": True
     }
 })
@@ -26,10 +32,10 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 def translate_video():
     # Handle CORS preflight request
     if request.method == 'OPTIONS':
-        response = jsonify(success=True)
+        response = Response()
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'POST')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         return response
 
     try:
@@ -48,9 +54,6 @@ def translate_video():
         elif 'youtube_url' in request.form:
             youtube_url = request.form['youtube_url']
             video_path = main.download_youtube_video(youtube_url)
-        
-        print("Received form data:", request.form)
-        print("Received files:", request.files)
         
         # Check if video was successfully obtained
         if not video_path:
@@ -74,22 +77,30 @@ def translate_video():
         if not final_video:
             return jsonify({"error": "Video translation failed"}), 500
         
-        # Explicitly use the known path
-        final_video_path = os.path.join('temp', 'final_translated_video.mp4')
+        # Explicitly use the correct path
+        final_video_path = os.path.join(TEMP_DIR, 'final_translated_video.mp4')
         
+        # Double-check file existence
         if not os.path.exists(final_video_path):
+            print(f"ERROR: Final video path does not exist: {final_video_path}")
+            print(f"Contents of temp directory: {os.listdir(TEMP_DIR)}")
             return jsonify({"error": "Translated video file not found"}), 500
         
-        return send_file(
+        # Create response with CORS headers
+        response = send_file(
             final_video_path, 
             mimetype='video/mp4', 
             as_attachment=True, 
             download_name='translated_video.mp4'
         )
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
     
     except Exception as e:
         print(f"Translation error: {e}")
-        return jsonify({"error": str(e)}), 500
+        error_response = jsonify({"error": str(e)})
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)

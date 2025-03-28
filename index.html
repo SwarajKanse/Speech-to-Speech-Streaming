@@ -196,53 +196,60 @@
             translateBtn.disabled = !(hasFile || hasYoutubeUrl);
         }
 
-async function translateVideo() {
-    translateBtn.disabled = true;
-    translateBtn.textContent = 'Translating...';
-    resultSection.style.display = 'none';
+        async function translateVideo() {
+            translateBtn.disabled = true;
+            translateBtn.textContent = 'Translating...';
+            resultSection.style.display = 'none';
 
-    try {
-        const formData = new FormData();
-        
-        if (selectedFile) {
-            formData.append('video', selectedFile);
-        } else if (youtubeUrlInput.value) {
-            formData.append('youtube_url', youtubeUrlInput.value);
+            try {
+                const formData = new FormData();
+                
+                if (selectedFile) {
+                    formData.append('video', selectedFile);
+                } else if (youtubeUrlInput.value) {
+                    formData.append('youtube_url', youtubeUrlInput.value);
+                }
+                
+                formData.append('target_language', languageSelect.value);
+
+                const response = await fetch('http://localhost:5001/api/translate-video', {
+                    method: 'POST',
+                    body: formData,
+                    // Add these headers explicitly
+                    headers: {
+                        // Intentionally left blank to allow browser to set Content-Type with boundary
+                    }
+                });
+
+                console.log('Response status:', response.status);
+
+                if (!response.ok) {
+                    // Try to parse error message from server
+                    const errorData = await response.json().catch(() => null);
+                    throw new Error(errorData?.error || 'Server responded with an error');
+                }
+
+                const blob = await response.blob();
+                const videoUrl = URL.createObjectURL(blob);
+                translatedVideo.src = videoUrl;
+                resultSection.style.display = 'block';
+            } catch (error) {
+                console.error('Complete error:', error);
+                
+                // More user-friendly error handling
+                let errorMessage = 'Video translation failed.';
+                if (error.message.includes('Failed to fetch')) {
+                    errorMessage += ' Unable to connect to the server. Please ensure the backend is running.';
+                } else {
+                    errorMessage += ` ${error.message}`;
+                }
+                
+                alert(errorMessage);
+            } finally {
+                translateBtn.disabled = false;
+                translateBtn.textContent = 'Translate Video';
+            }
         }
-        
-        formData.append('target_language', languageSelect.value);
-
-        console.log('Sending request to:', 'http://localhost:5000/api/translate-video');
-        console.log('FormData contents:');
-        for (let [key, value] of formData.entries()) {
-            console.log(key, value);
-        }
-
-        const response = await fetch('http://localhost:5000/api/translate-video', {
-            method: 'POST',
-            body: formData
-        });
-
-        console.log('Response status:', response.status);
-
-        if (response.ok) {
-            const blob = await response.blob();
-            const videoUrl = URL.createObjectURL(blob);
-            translatedVideo.src = videoUrl;
-            resultSection.style.display = 'block';
-        } else {
-            const errorData = await response.json();
-            console.error('Server error:', errorData);
-            throw new Error(errorData.error || 'Translation failed');
-        }
-    } catch (error) {
-        console.error('Complete error:', error);
-        alert(error.message || 'Video translation failed. Please try again.');
-    } finally {
-        translateBtn.disabled = false;
-        translateBtn.textContent = 'Translate Video';
-    }
-}
 
         function downloadVideo() {
             if (translatedVideo.src) {

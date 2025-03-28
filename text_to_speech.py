@@ -1,6 +1,7 @@
 import os
 import requests
 import math
+from dotenv import load_dotenv
 
 # Ensure the temp directory exists
 TEMP_DIR = 'temp'
@@ -94,8 +95,12 @@ class TextToSpeech:
             return None
 
 def main():
-    # Placeholder for API key - replace with your actual ElevenLabs API key
-    API_KEY = 'sk_641db2d458696e5912207bb26007b927b657f7b08a7ec625'
+    
+    load_dotenv()
+    API_KEY = os.getenv('ELEVENLABS_API_KEY')
+    if not API_KEY:
+        print("Error: ELEVENLABS_API_KEY not found in .env file.")
+        return
     
     # Read the translated text
     translation_path = os.path.join(TEMP_DIR, 'translated_text.txt')

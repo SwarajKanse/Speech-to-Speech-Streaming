@@ -5,3 +5,5 @@ requests
 python-dotenv
 elevenlabs
 yt-dlp
+flask
+flask-cors
